@@ -31,4 +31,4 @@ USER small-user:small-user
 
 EXPOSE 7777
 
-CMD ["./main"]
+ENTRYPOINT ["./main"]
