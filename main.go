@@ -16,69 +16,124 @@
 package main
 
 import (
-	"context"
-	"io"
 	"log"
 	"net/http"
 	"os"
 
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/propagation"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
-
-	cloudtrace "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace"
-	gcppropagator "github.com/GoogleCloudPlatform/opentelemetry-operations-go/propagator"
+	"contrib.go.opencensus.io/exporter/stackdriver"
+	"contrib.go.opencensus.io/exporter/stackdriver/propagation"
+	"go.opencensus.io/plugin/ochttp"
+	"go.opencensus.io/trace"
 )
 
-func initTracer() func() {
-	projectID := os.Getenv("PROJECT_ID")
+//
+//func initTracer() func() {
+//	projectID := os.Getenv("PROJECT_ID")
+//
+//	// Create Google Cloud Trace exporter to be able to retrieve
+//	// the collected spans.
+//	exporter, err := cloudtrace.New(cloudtrace.WithProjectID(projectID))
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	tp := sdktrace.NewTracerProvider(
+//		// For this example code we use sdktrace.AlwaysSample sampler to sample all traces.
+//		// In a production application, use sdktrace.ProbabilitySampler with a desired probability.
+//		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+//		sdktrace.WithBatcher(exporter))
+//
+//	otel.SetTracerProvider(tp)
+//	return func() { tp.Shutdown(context.Background()) }
+//}
+//
+//func installPropagators() {
+//	otel.SetTextMapPropagator(
+//		propagation.NewCompositeTextMapPropagator(
+//			// Putting the CloudTraceOneWayPropagator first means the TraceContext propagator
+//			// takes precedence if both the traceparent and the XCTC headers exist.
+//			gcppropagator.CloudTraceOneWayPropagator{},
+//			propagation.TraceContext{},
+//			propagation.Baggage{},
+//		))
+//}
+//
+//func main() {
+//	installPropagators()
+//	shutdown := initTracer()
+//	defer shutdown()
+//
+//	helloHandler := func(w http.ResponseWriter, req *http.Request) {
+//		ctx := req.Context()
+//		span := trace.SpanFromContext(ctx)
+//		span.SetAttributes(attribute.String("server", "handling this..."))
+//
+//		_, _ = io.WriteString(w, "Hello, world!\n")
+//	}
+//	otelHandler := otelhttp.NewHandler(http.HandlerFunc(helloHandler), "Hello")
+//	http.Handle("/", otelHandler)
+//	err := http.ListenAndServe(":8080", nil)
+//	if err != nil {
+//		panic(err)
+//	}
+//}
 
-	// Create Google Cloud Trace exporter to be able to retrieve
-	// the collected spans.
-	exporter, err := cloudtrace.New(cloudtrace.WithProjectID(projectID))
+func main() {
+	// Create and register a OpenCensus Stackdriver Trace exporter.
+	exporter, err := stackdriver.NewExporter(stackdriver.Options{
+		ProjectID: os.Getenv("GOOGLE_CLOUD_PROJECT"),
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	tp := sdktrace.NewTracerProvider(
-		// For this example code we use sdktrace.AlwaysSample sampler to sample all traces.
-		// In a production application, use sdktrace.ProbabilitySampler with a desired probability.
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-		sdktrace.WithBatcher(exporter))
+	trace.RegisterExporter(exporter)
 
-	otel.SetTracerProvider(tp)
-	return func() { tp.Shutdown(context.Background()) }
-}
+	// By default, traces will be sampled relatively rarely. To change the
+	// sampling frequency for your entire program, call ApplyConfig. Use a
+	// ProbabilitySampler to sample a subset of traces, or use AlwaysSample to
+	// collect a trace on every run.
+	//
+	// Be careful about using trace.AlwaysSample in a production application
+	// with significant traffic: a new trace will be started and exported for
+	// every request.
+	trace.ApplyConfig(trace.Config{DefaultSampler: trace.AlwaysSample()})
 
-func installPropagators() {
-	otel.SetTextMapPropagator(
-		propagation.NewCompositeTextMapPropagator(
-			// Putting the CloudTraceOneWayPropagator first means the TraceContext propagator
-			// takes precedence if both the traceparent and the XCTC headers exist.
-			gcppropagator.CloudTraceOneWayPropagator{},
-			propagation.TraceContext{},
-			propagation.Baggage{},
-		))
-}
-
-func main() {
-	installPropagators()
-	shutdown := initTracer()
-	defer shutdown()
-
-	helloHandler := func(w http.ResponseWriter, req *http.Request) {
-		ctx := req.Context()
-		span := trace.SpanFromContext(ctx)
-		span.SetAttributes(attribute.String("server", "handling this..."))
-
-		_, _ = io.WriteString(w, "Hello, world!\n")
+	client := &http.Client{
+		Transport: &ochttp.Transport{
+			// Use Google Cloud propagation format.
+			Propagation: &propagation.HTTPFormat{},
+		},
 	}
-	otelHandler := otelhttp.NewHandler(http.HandlerFunc(helloHandler), "Hello")
-	http.Handle("/hello", otelHandler)
-	err := http.ListenAndServe(":7777", nil)
-	if err != nil {
-		panic(err)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req, _ := http.NewRequest("GET", "https://www.google.com", nil)
+
+		// The trace ID from the incoming request will be
+		// propagated to the outgoing request.
+		req = req.WithContext(r.Context())
+
+		// The outgoing request will be traced with r's trace ID.
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Fatal(err)
+		}
+		// Because we don't read the resp.Body, need to manually call Close().
+		resp.Body.Close()
+	})
+	http.Handle("/test", handler)
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("Listening on port %s", port)
+
+	// Use an ochttp.Handler in order to instrument OpenCensus for incoming
+	// requests.
+	httpHandler := &ochttp.Handler{
+		// Use the Google Cloud propagation format.
+		Propagation: &propagation.HTTPFormat{},
+	}
+	if err := http.ListenAndServe(":"+port, httpHandler); err != nil {
+		log.Fatal(err)
 	}
 }

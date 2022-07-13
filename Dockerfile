@@ -29,6 +29,6 @@ COPY --from=base /main .
 
 USER small-user:small-user
 
-EXPOSE 7777
+EXPOSE 8080
 
-ENTRYPOINT ["./main"]
+ENTRYPOINT ["bash"]
